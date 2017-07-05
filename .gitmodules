@@ -1,0 +1,3 @@
+[submodule "pyhtml"]
+	path = pyhtml
+	url = git@github.com:nbingham1/pyhtml.git
