@@ -5,56 +5,160 @@ from pyhtml import parse
 from pyhtml import html
 from pyhtml import css
 
-def hocr2html(syntax, parent = None, left = None):
-	if isinstance(syntax, html.Tag):
-		if 'class' in syntax.attrs:
-			if syntax.attrs['class'][0:3] == 'ocr':
-				style = css.Style()
+def parse_ocr_attrs(syntax, parent=None, left=None):
+	syntax.ocr = dict()
+	if 'class' in syntax.attrs and syntax.attrs['class'][0:3] == 'ocr' and 'title' in syntax.attrs:
+		attrs = syntax.attrs['title'].split(';')
+		for attr in attrs:
+			elems = attr.strip().split(' ')
+			if elems:
+				if elems[0] == 'bbox':
+					syntax.ocr['bbox'] = [int(e) for e in elems[1:]]
+				else:
+					syntax.ocr[elems[0]] = elems[1:]
+		del syntax.attrs['title']
+	return syntax
 
-				attrs = syntax.attrs['title'].split(';')
-				for attr in attrs:
-					elems = attr.strip().split(' ')
-					if elems[0] == 'x_wconf':
-						wconf = float(int(elems[1]))/100.0
-						#style.set("background-color", css.Rgb(1.0-wconf, wconf, 0.0))
-					elif elems[0] == 'bbox':
-						startx = 0
-						starty = 0
-						width = None
-						height = None
-						if parent and 'title' in parent.attrs:
-							parent_attrs = parent.attrs['title'].split(';')
-							for parent_attr in parent_attrs:
-								parent_elems = parent_attr.strip().split(' ')
-								if parent_elems[0] == 'bbox':
-									startx = int(parent_elems[1])
-									starty = int(parent_elems[2])
-									width = int(parent_elems[3]) - int(parent_elems[1])
-									height = int(parent_elems[4]) - int(parent_elems[2])
+def fix_contractions(syntax, parent=None, left=None):
+	if 'class' in syntax.attrs and syntax.attrs['class'] == 'ocrx_word' and len(syntax.content) > 1:
+		if syntax.content[1][0] in ['s', 't']:
+			syntax.content[0] += '\'' + syntax.content[1]
+			del syntax.content[1]
+	return syntax
 
-						width = int(elems[3]) - int(elems[1])
-						height = int(elems[4]) - int(elems[2])
-						startx = int(elems[1]) - startx
-						starty = int(elems[2]) - starty
+def set_position(syntax, parent=None, left=None):
+	if 'bbox' in syntax.ocr:
+		if 'style' not in syntax.attrs:
+			syntax.attrs['style'] = css.Style()
+		width = syntax.ocr['bbox'][2] - syntax.ocr['bbox'][0]
+		height = syntax.ocr['bbox'][3] - syntax.ocr['bbox'][1]
+		if parent and 'bbox' in parent.ocr:
+			pwidth = parent.ocr['bbox'][2] - parent.ocr['bbox'][0]
+			pheight = parent.ocr['bbox'][3] - parent.ocr['bbox'][1]
+			offx = syntax.ocr['bbox'][0] - parent.ocr['bbox'][0]
+			offy = syntax.ocr['bbox'][1] - parent.ocr['bbox'][1]
+			syntax.attrs['style'].set("left", str(100*offx/pwidth)+"%")
+			syntax.attrs['style'].set("top", str(100*offy/pheight)+"%")
+			syntax.attrs['style'].set("width", str(width)+"px")
+			syntax.attrs['style'].set("height", str(height)+"px")
+		else:
+			offx = syntax.ocr['bbox'][0]
+			offy = syntax.ocr['bbox'][1]
+			syntax.attrs['style'].set("left", str(offx) + "px")
+			syntax.attrs['style'].set("top", str(offy)+"px")
+			syntax.attrs['style'].set("width", str(width) + "px")
+			syntax.attrs['style'].set("height", str(height) + "px")
+	return syntax
 
-						style.set("position", "absolute")
-						style.set("left", str(startx)+"px")
-						style.set("top", str(starty)+"px")
-						style.set("width", str(width)+"px")
-						style.set("height", str(height)+"px")
-				
-				syntax.attrs['style'] = style
-							
+def align_lines(syntax, parent=None, left=None):
+	if 'bbox' in syntax.ocr:
+		if 'class' in syntax.attrs and syntax.attrs['class'] == 'ocr_par':
+			height = syntax.ocr['bbox'][3] - syntax.ocr['bbox'][1]
+			line_height = 0
+			for line in syntax.content:
+				if isinstance(line, html.Tag) and 'class' in line.attrs and line.attrs['class'] == 'ocr_line' and 'bbox' in line.ocr:
+					line_height = max(line_height, line.ocr['bbox'][3] - line.ocr['bbox'][1])
+	
+			if line_height == 0:
+				line_height = height
+
+			num_lines = int(round(float(height)/float(line_height)))
+			line_height = height/num_lines
+			#if 'style' not in syntax.attrs:
+			#	syntax.attrs['style'] = css.Style()
+			#syntax.attrs['style'].set("font-size", str(line_height) + "px")
+
+			center = False
+			for i,line in enumerate(syntax.content):
+				if isinstance(line, html.Tag) and 'class' in line.attrs and line.attrs['class'] == 'ocr_line' and 'bbox' in line.ocr:
+					loff = abs(line.ocr['bbox'][0] - syntax.ocr['bbox'][0])
+					roff = abs(line.ocr['bbox'][2] - syntax.ocr['bbox'][2])
+					if min(loff, roff) > 2 and abs(loff-roff) < 5:
+						center = True
+
+					idx = int(round(float(i*num_lines)/float(len(syntax.content))))
+					#line.ocr['bbox'][0] = syntax.ocr['bbox'][0]
+					#line.ocr['bbox'][2] = syntax.ocr['bbox'][2]
+					line.ocr['bbox'][1] = idx*line_height + syntax.ocr['bbox'][1]
+					line.ocr['bbox'][3] = (idx+1)*line_height + syntax.ocr['bbox'][1]
+			#if center:
+			#	syntax.attrs['style'].set("text-align", "center")
+
+	return syntax
+
+def align_words(syntax, parent=None, left=None):
+	if 'bbox' in syntax.ocr:
+		if 'class' in syntax.attrs and syntax.attrs['class'] == 'ocr_line':
+			width = syntax.ocr['bbox'][2] - syntax.ocr['bbox'][0]
+			for i,word in enumerate(syntax.content):
+				if isinstance(word, html.Tag) and 'class' in word.attrs and word.attrs['class'] == 'ocrx_word' and 'bbox' in word.ocr:
+					word.ocr['bbox'][1] = syntax.ocr['bbox'][1]
+					word.ocr['bbox'][3] = syntax.ocr['bbox'][3]
+	return syntax
+
+def trim_empty(syntax, parent=None, left=None):
+	if 'class' in syntax.attrs and syntax.attrs['class'] in ['ocr_line', 'ocr_par', 'ocr_carea']:
+		for i,elem in reversed(list(enumerate(syntax.content))):
+			if not elem.content:
+				del syntax.content[i]
+	
+	if 'class' in syntax.attrs and syntax.attrs['class'] in ['ocr_carea']:
+		if not syntax.content:
+			if 'style' not in syntax.attrs:
+				syntax.attrs['style'] = css.Style()
+			syntax.attrs['style'].set("background-color", "#000000")
+
+	return syntax
+
+def consolidate_lines(syntax, parent=None, left=None):
+	if 'class' in syntax.attrs and syntax.attrs['class'] == 'ocr_line':
+		min_sep = syntax.ocr['bbox'][2] - syntax.ocr['bbox'][0]
+		last_x = None
+		for word in syntax.content:
+			if last_x:
+				sep = word.ocr['bbox'][0] - last_x
+				if sep > 0:
+					min_sep = min(min_sep, sep)
+			last_x = word.ocr['bbox'][2]
+		
+		if min_sep < 60:
+			for i,word in reversed(list(enumerate(syntax.content))):
+				if i > 0:
+					sep = word.ocr['bbox'][0] - syntax.content[i-1].ocr['bbox'][2]
+					if abs(sep - min_sep) < 30:
+						syntax.content[i-1].content += word.content
+						#syntax.content[i-1].content = ' '.join(syntax.content[i-1].content)
+						syntax.content[i-1].ocr['bbox'][2] = max(syntax.content[i-1].ocr['bbox'][2], word.ocr['bbox'][2])
+						del syntax.content[i]
+		if len(syntax.content) == 1:
+			syntax.content = syntax.content[0].content
 			
-		for i,elem in enumerate(syntax.content):
-			syntax.content[i] = hocr2html(elem, syntax, syntax.content[i-1] if i > 0 else left)
+	return syntax
 
-		#if 'class' in syntax.attrs and syntax.attrs['class'] == 'ocrx_word' and len(syntax.content) == 1:
-		#	return syntax.content[0]
-		#else:
-		return syntax
-	else:
-		return syntax
+def consolidate_paras(syntax, parent=None, left=None):
+	if 'class' in syntax.attrs and syntax.attrs['class'] == 'ocr_par':
+		min_sep = syntax.ocr['bbox'][3] - syntax.ocr['bbox'][1]
+		last_x = None
+		for word in syntax.content:
+			if last_x:
+				sep = word.ocr['bbox'][1] - last_x
+				if sep > 0:
+					min_sep = min(min_sep, sep)
+			last_x = word.ocr['bbox'][3]
+		
+		if min_sep < 60:
+			for i,word in reversed(list(enumerate(syntax.content))):
+				if i > 0:
+					sep = word.ocr['bbox'][1] - syntax.content[i-1].ocr['bbox'][3]
+					if abs(sep - min_sep) < 50:
+						syntax.content[i-1].content += word.content
+						#syntax.content[i-1].content = ' '.join(syntax.content[i-1].content)
+						syntax.content[i-1].ocr['bbox'][3] = max(syntax.content[i-1].ocr['bbox'][3], word.ocr['bbox'][3])
+						del syntax.content[i]
+		if len(syntax.content) == 1:
+			syntax.content = syntax.content[0].content
+			
+	return syntax
 
 
 
@@ -63,4 +167,23 @@ parser = parse.Parser()
 with open(sys.argv[1], 'r') as fptr:
 	parser.feed(fptr.read())
 
-print hocr2html(parser.syntax).content[0]
+syntax = parser.syntax.content[0]
+syntax = parse.walk(syntax, parse_ocr_attrs)
+syntax = parse.walk(syntax, fix_contractions)
+syntax = parse.walk(syntax, trim_empty)
+syntax = parse.walk(syntax, consolidate_lines)
+syntax = parse.walk(syntax, consolidate_paras)
+#syntax = parse.walk(syntax, align_lines)
+#syntax = parse.walk(syntax, align_words)
+syntax = parse.walk(syntax, set_position)
+
+style = syntax['head'][0] << html.Style() << css.Css()
+allocr = css.Style()
+allocr.set("position", "absolute")
+allocr.set("margin-top", "0px")
+allocr.set("margin-bottom", "0px")
+allocr.set("margin-left", "0px")
+allocr.set("margin-right", "0px")
+style.elems['.ocr_page,.ocr_carea,.ocr_par,.ocr_line,.ocrx_word'] = allocr
+
+print syntax
