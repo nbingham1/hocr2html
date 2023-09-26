@@ -1,6 +1,7 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import sys
+from lxml import etree
 from pyhtml import parse
 from pyhtml import html
 from pyhtml import css
@@ -99,7 +100,7 @@ def align_words(syntax, parent=None, left=None):
 def trim_empty(syntax, parent=None, left=None):
 	if 'class' in syntax.attrs and syntax.attrs['class'] in ['ocr_line', 'ocr_par', 'ocr_carea']:
 		for i,elem in reversed(list(enumerate(syntax.content))):
-			if not elem.content:
+			if isinstance(elem, html.Tag) and not elem.content:
 				del syntax.content[i]
 	
 	if 'class' in syntax.attrs and syntax.attrs['class'] in ['ocr_carea']:
@@ -115,21 +116,33 @@ def consolidate_lines(syntax, parent=None, left=None):
 		min_sep = syntax.ocr['bbox'][2] - syntax.ocr['bbox'][0]
 		last_x = None
 		for word in syntax.content:
-			if last_x:
-				sep = word.ocr['bbox'][0] - last_x
-				if sep > 0:
-					min_sep = min(min_sep, sep)
-			last_x = word.ocr['bbox'][2]
+			if isinstance(word, (html.Tag, html.STag)):
+				if last_x:
+					sep = word.ocr['bbox'][0] - last_x
+					if sep > 0:
+						min_sep = min(min_sep, sep)
+				last_x = word.ocr['bbox'][2]
 		
 		if min_sep < 60:
-			for i,word in reversed(list(enumerate(syntax.content))):
+			for i in reversed(range(0, len(syntax.content))):
+				word = syntax.content[i]
 				if i > 0:
-					sep = word.ocr['bbox'][0] - syntax.content[i-1].ocr['bbox'][2]
-					if abs(sep - min_sep) < 30:
-						syntax.content[i-1].content += word.content
-						#syntax.content[i-1].content = ' '.join(syntax.content[i-1].content)
-						syntax.content[i-1].ocr['bbox'][2] = max(syntax.content[i-1].ocr['bbox'][2], word.ocr['bbox'][2])
+					if not isinstance(syntax.content[i-1], (html.Tag, html.STag)) and not isinstance(word, (html.Tag, html.STag)):
+						syntax.content[i-1] += word
 						del syntax.content[i]
+					elif not isinstance(syntax.content[i-1], (html.Tag, html.STag)):
+						word.content = [syntax.content[i-1]] + word.content
+						del syntax.content[i-1]
+					elif not isinstance(word, (html.Tag, html.STag)):
+						syntax.content[i-1].content += [word]
+						del syntax.content[i]
+					else:
+						sep = word.ocr['bbox'][0] - syntax.content[i-1].ocr['bbox'][2]
+						if abs(sep - min_sep) < 30:
+							syntax.content[i-1].content += word.content
+							#syntax.content[i-1].content = ' '.join(syntax.content[i-1].content)
+							syntax.content[i-1].ocr['bbox'][2] = max(syntax.content[i-1].ocr['bbox'][2], word.ocr['bbox'][2])
+							del syntax.content[i]
 		if len(syntax.content) == 1:
 			syntax.content = syntax.content[0].content
 			
@@ -140,34 +153,44 @@ def consolidate_paras(syntax, parent=None, left=None):
 		min_sep = syntax.ocr['bbox'][3] - syntax.ocr['bbox'][1]
 		last_x = None
 		for word in syntax.content:
-			if last_x:
-				sep = word.ocr['bbox'][1] - last_x
-				if sep > 0:
-					min_sep = min(min_sep, sep)
-			last_x = word.ocr['bbox'][3]
+			if isinstance(word, (html.Tag, html.STag)):
+				if last_x:
+					sep = word.ocr['bbox'][1] - last_x
+					if sep > 0:
+						min_sep = min(min_sep, sep)
+				last_x = word.ocr['bbox'][3]
 		
 		if min_sep < 60:
-			for i,word in reversed(list(enumerate(syntax.content))):
+			for i in reversed(range(0, len(syntax.content))):
+				word = syntax.content[i]
 				if i > 0:
-					sep = word.ocr['bbox'][1] - syntax.content[i-1].ocr['bbox'][3]
-					if abs(sep - min_sep) < 50:
-						syntax.content[i-1].content += word.content
-						#syntax.content[i-1].content = ' '.join(syntax.content[i-1].content)
-						syntax.content[i-1].ocr['bbox'][3] = max(syntax.content[i-1].ocr['bbox'][3], word.ocr['bbox'][3])
+					if not isinstance(syntax.content[i-1], (html.Tag, html.STag)) and not isinstance(word, (html.Tag, html.STag)):
+						syntax.content[i-1] += word
 						del syntax.content[i]
+					elif not isinstance(syntax.content[i-1], (html.Tag, html.STag)):
+						word.content = [syntax.content[i-1]] + word.content
+						del syntax.content[i-1]
+					elif not isinstance(word, (html.Tag, html.STag)):
+						syntax.content[i-1].content += [word]
+						del syntax.content[i]
+					else:
+						sep = word.ocr['bbox'][1] - syntax.content[i-1].ocr['bbox'][3]
+						if abs(sep - min_sep) < 50:
+							syntax.content[i-1].content += word.content
+							#syntax.content[i-1].content = ' '.join(syntax.content[i-1].content)
+							syntax.content[i-1].ocr['bbox'][3] = max(syntax.content[i-1].ocr['bbox'][3], word.ocr['bbox'][3])
+							del syntax.content[i]
 		if len(syntax.content) == 1:
 			syntax.content = syntax.content[0].content
 			
 	return syntax
 
 
-
-parser = parse.Parser()
-          
+parser = etree.HTMLParser(target = parse.Parser())
 with open(sys.argv[1], 'r') as fptr:
 	parser.feed(fptr.read())
+syntax = parser.close().syntax.content[0]
 
-syntax = parser.syntax.content[0]
 syntax = parse.walk(syntax, parse_ocr_attrs)
 syntax = parse.walk(syntax, fix_contractions)
 syntax = parse.walk(syntax, trim_empty)
@@ -177,13 +200,14 @@ syntax = parse.walk(syntax, consolidate_paras)
 #syntax = parse.walk(syntax, align_words)
 syntax = parse.walk(syntax, set_position)
 
-style = syntax['head'][0] << html.Style() << css.Css()
+headStyle = css.Css()
 allocr = css.Style()
 allocr.set("position", "absolute")
 allocr.set("margin-top", "0px")
 allocr.set("margin-bottom", "0px")
 allocr.set("margin-left", "0px")
 allocr.set("margin-right", "0px")
-style.elems['.ocr_page,.ocr_carea,.ocr_par,.ocr_line,.ocrx_word'] = allocr
+headStyle.elems['.ocr_page,.ocr_carea,.ocr_par,.ocr_line,.ocrx_word'] = allocr
+syntax['head'][0] << (html.Style() << headStyle)
 
-print syntax
+print(syntax)
